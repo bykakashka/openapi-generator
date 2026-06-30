@@ -41,15 +41,6 @@ import java.util.stream.Stream;
 
 import lombok.Getter;
 import lombok.Setter;
-import org.openapitools.codegen.CliOption;
-import org.openapitools.codegen.CodegenConstants;
-import org.openapitools.codegen.CodegenModel;
-import org.openapitools.codegen.CodegenOperation;
-import org.openapitools.codegen.CodegenParameter;
-import org.openapitools.codegen.CodegenProperty;
-import org.openapitools.codegen.CodegenType;
-import org.openapitools.codegen.SupportingFile;
-import org.openapitools.codegen.VendorExtension;
 import org.openapitools.codegen.meta.features.ClientModificationFeature;
 import org.openapitools.codegen.meta.features.DocumentationFeature;
 import org.openapitools.codegen.meta.features.GlobalFeature;
@@ -113,6 +104,7 @@ public class KotlinClientCodegen extends AbstractKotlinCodegen {
     public static final String GENERATE_ONEOF_ANYOF_WRAPPERS = "generateOneOfAnyOfWrappers";
 
     public static final String COMPANION_OBJECT = "companionObject";
+    public static final String REMOVE_DISCRIMINATOR_FROM_CHILD_MODELS = "removeDiscriminatorFromChildModels";
 
     protected static final String VENDOR_EXTENSION_BASE_NAME_LITERAL = "x-base-name-literal";
 
@@ -132,6 +124,7 @@ public class KotlinClientCodegen extends AbstractKotlinCodegen {
     @Setter protected boolean generateOneOfAnyOfWrappers = true;
     @Getter @Setter protected boolean failOnUnknownProperties = false;
     @Setter protected boolean companionObject = false;
+    @Setter protected boolean removeDiscriminatorFromChildModels = false;
 
     protected String authFolder;
 
@@ -298,6 +291,7 @@ public class KotlinClientCodegen extends AbstractKotlinCodegen {
         cliOptions.add(CliOption.newBoolean(GENERATE_ONEOF_ANYOF_WRAPPERS, "Generate oneOf, anyOf schemas as wrappers. Only `jvm-retrofit2`(library) with `gson` or `kotlinx_serialization`(serializationLibrary) support this option."));
 
         cliOptions.add(CliOption.newBoolean(COMPANION_OBJECT, "Whether to generate companion objects in data classes, enabling companion extensions.", false));
+        cliOptions.add(CliOption.newBoolean(REMOVE_DISCRIMINATOR_FROM_CHILD_MODELS, "Remove the discriminator property from child models when Jackson handles it automatically via @JsonTypeInfo.", false));
 
         CliOption serializationLibraryOpt = new CliOption(CodegenConstants.SERIALIZATION_LIBRARY, SERIALIZATION_LIBRARY_DESC);
         cliOptions.add(serializationLibraryOpt.defaultValue(serializationLibrary.name()));
@@ -511,6 +505,12 @@ public class KotlinClientCodegen extends AbstractKotlinCodegen {
             setCompanionObject(convertPropertyToBooleanAndWriteBack(COMPANION_OBJECT));
         } else {
             additionalProperties.put(COMPANION_OBJECT, companionObject);
+        }
+
+        if (additionalProperties.containsKey(REMOVE_DISCRIMINATOR_FROM_CHILD_MODELS)) {
+            setRemoveDiscriminatorFromChildModels(convertPropertyToBooleanAndWriteBack(REMOVE_DISCRIMINATOR_FROM_CHILD_MODELS));
+        } else {
+            additionalProperties.put(REMOVE_DISCRIMINATOR_FROM_CHILD_MODELS, removeDiscriminatorFromChildModels);
         }
 
         commonSupportingFiles();
@@ -993,7 +993,8 @@ public class KotlinClientCodegen extends AbstractKotlinCodegen {
     @Override
     public Map<String, ModelsMap> postProcessAllModels(Map<String, ModelsMap> objs) {
         objs = super.postProcessAllModels(objs);
-        if (getSerializationLibrary() == SERIALIZATION_LIBRARY_TYPE.kotlinx_serialization || getLibrary().equals(MULTIPLATFORM)) {
+        if (getSerializationLibrary() == SERIALIZATION_LIBRARY_TYPE.kotlinx_serialization || getLibrary().equals(MULTIPLATFORM)
+                || (removeDiscriminatorFromChildModels && getSerializationLibrary() == SERIALIZATION_LIBRARY_TYPE.jackson)) {
             // The loop removes unneeded variables so commas are handled correctly in the related templates
             for (Map.Entry<String, ModelsMap> modelsMap : objs.entrySet()) {
                 for (ModelMap mo : modelsMap.getValue().getModels()) {
@@ -1007,8 +1008,9 @@ public class KotlinClientCodegen extends AbstractKotlinCodegen {
                     // because single entity can be referenced in multiple "parent" entities,
                     // so discriminator for one might not be discriminator for another.
                     boolean shouldKeepDiscriminatorField = generateOneOfAnyOfWrappers && cm.oneOf != null && !cm.oneOf.isEmpty();
+                    boolean isJacksonDiscriminatorRemoval = removeDiscriminatorFromChildModels && getSerializationLibrary() == SERIALIZATION_LIBRARY_TYPE.jackson;
 
-                    if (shouldKeepDiscriminatorField) {
+                    if (shouldKeepDiscriminatorField && !isJacksonDiscriminatorRemoval) {
                         continue;
                     }
 
@@ -1016,15 +1018,17 @@ public class KotlinClientCodegen extends AbstractKotlinCodegen {
                     getAllVarProperties(cm).forEach(list -> list.removeIf(var -> var.name.equals(discriminator.getPropertyName())));
 
                     for (CodegenDiscriminator.MappedModel mappedModel : discriminator.getMappedModels()) {
-                        // Add the mapping name to additionalProperties.discriminatorValue
-                        // The mapping name is used to define SerializedName, which in result makes derived classes
-                        // found by kotlinx-serialization during deserialization
-                        CodegenProperty additionalProperties = mappedModel.getModel().getAdditionalProperties();
-                        if (additionalProperties == null) {
-                            additionalProperties = new CodegenProperty();
-                            mappedModel.getModel().setAdditionalProperties(additionalProperties);
+                        if (!isJacksonDiscriminatorRemoval) {
+                            // Add the mapping name to additionalProperties.discriminatorValue
+                            // The mapping name is used to define SerializedName, which in result makes derived classes
+                            // found by kotlinx-serialization during deserialization
+                            CodegenProperty additionalProperties = mappedModel.getModel().getAdditionalProperties();
+                            if (additionalProperties == null) {
+                                additionalProperties = new CodegenProperty();
+                                mappedModel.getModel().setAdditionalProperties(additionalProperties);
+                            }
+                            additionalProperties.discriminatorValue = mappedModel.getMappingName();
                         }
-                        additionalProperties.discriminatorValue = mappedModel.getMappingName();
                         // Remove the discriminator property from the derived class, it is not needed in the generated code
                         getAllVarProperties(mappedModel.getModel()).forEach(list -> list.removeIf(prop -> prop.name.equals(discriminator.getPropertyName())));
 
